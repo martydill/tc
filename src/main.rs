@@ -193,6 +193,394 @@ fn process_file(path: &Path, bpe: &CoreBPE) -> Result<Counts> {
     Ok(count_all(&content, bpe))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    // --- Counts ---
+
+    #[test]
+    fn counts_default_is_zero() {
+        let c = Counts::default();
+        assert_eq!(c.tokens, 0);
+        assert_eq!(c.lines, 0);
+        assert_eq!(c.words, 0);
+        assert_eq!(c.chars, 0);
+        assert_eq!(c.bytes, 0);
+    }
+
+    #[test]
+    fn counts_add_accumulates() {
+        let mut a = Counts {
+            tokens: 1,
+            lines: 2,
+            words: 3,
+            chars: 4,
+            bytes: 5,
+        };
+        let b = Counts {
+            tokens: 10,
+            lines: 20,
+            words: 30,
+            chars: 40,
+            bytes: 50,
+        };
+        a.add(&b);
+        assert_eq!(a.tokens, 11);
+        assert_eq!(a.lines, 22);
+        assert_eq!(a.words, 33);
+        assert_eq!(a.chars, 44);
+        assert_eq!(a.bytes, 55);
+    }
+
+    #[test]
+    fn counts_add_zero_is_identity() {
+        let mut a = Counts {
+            tokens: 5,
+            lines: 10,
+            words: 15,
+            chars: 20,
+            bytes: 25,
+        };
+        let zero = Counts::default();
+        a.add(&zero);
+        assert_eq!(a.tokens, 5);
+        assert_eq!(a.lines, 10);
+        assert_eq!(a.words, 15);
+        assert_eq!(a.chars, 20);
+        assert_eq!(a.bytes, 25);
+    }
+
+    // --- create_bpe ---
+
+    #[test]
+    fn create_bpe_valid_encodings() {
+        for name in &[
+            "cl100k",
+            "cl100k_base",
+            "o200k",
+            "o200k_base",
+            "p50k",
+            "p50k_base",
+            "p50k_edit",
+            "r50k",
+            "r50k_base",
+        ] {
+            assert!(
+                create_bpe(name).is_ok(),
+                "Expected valid encoding for '{}'",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn create_bpe_invalid_encoding() {
+        let result = create_bpe("nonexistent");
+        let msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("Expected error for unknown encoding"),
+        };
+        assert!(msg.contains("Unknown encoding"));
+        assert!(msg.contains("nonexistent"));
+    }
+
+    // --- count_all ---
+
+    #[test]
+    fn count_all_empty_string() {
+        let bpe = cl100k_base().unwrap();
+        let c = count_all("", &bpe);
+        assert_eq!(c.tokens, 0);
+        assert_eq!(c.lines, 0);
+        assert_eq!(c.words, 0);
+        assert_eq!(c.chars, 0);
+        assert_eq!(c.bytes, 0);
+    }
+
+    #[test]
+    fn count_all_single_word() {
+        let bpe = cl100k_base().unwrap();
+        let c = count_all("hello", &bpe);
+        assert!(c.tokens >= 1);
+        assert_eq!(c.lines, 1);
+        assert_eq!(c.words, 1);
+        assert_eq!(c.chars, 5);
+        assert_eq!(c.bytes, 5);
+    }
+
+    #[test]
+    fn count_all_multiple_lines() {
+        let bpe = cl100k_base().unwrap();
+        let c = count_all("line one\nline two\nline three", &bpe);
+        assert_eq!(c.lines, 3);
+        assert_eq!(c.words, 6);
+    }
+
+    #[test]
+    fn count_all_unicode() {
+        let bpe = cl100k_base().unwrap();
+        let text = "café résumé";
+        let c = count_all(text, &bpe);
+        assert_eq!(c.words, 2);
+        // chars != bytes for multi-byte UTF-8
+        assert_eq!(c.chars, 11); // c-a-f-é- -r-é-s-u-m-é
+        assert!(c.bytes > c.chars); // é is 2 bytes in UTF-8
+        assert!(c.tokens >= 1);
+    }
+
+    #[test]
+    fn count_all_whitespace_only() {
+        let bpe = cl100k_base().unwrap();
+        let c = count_all("   \n  \n  ", &bpe);
+        assert_eq!(c.words, 0);
+        assert_eq!(c.lines, 3);
+    }
+
+    #[test]
+    fn count_all_different_encodings_may_differ() {
+        let cl = cl100k_base().unwrap();
+        let o2 = o200k_base().unwrap();
+        let text = "The quick brown fox jumps over the lazy dog";
+        let c1 = count_all(text, &cl);
+        let c2 = count_all(text, &o2);
+        // Non-token counts must be identical
+        assert_eq!(c1.lines, c2.lines);
+        assert_eq!(c1.words, c2.words);
+        assert_eq!(c1.chars, c2.chars);
+        assert_eq!(c1.bytes, c2.bytes);
+        // Token counts may differ between encodings
+        assert!(c1.tokens >= 1);
+        assert!(c2.tokens >= 1);
+    }
+
+    // --- format_human ---
+
+    #[test]
+    fn format_human_small_numbers() {
+        assert_eq!(format_human(0), "0");
+        assert_eq!(format_human(1), "1");
+        assert_eq!(format_human(999), "999");
+    }
+
+    #[test]
+    fn format_human_thousands() {
+        assert_eq!(format_human(1_000), "1.0k");
+        assert_eq!(format_human(1_500), "1.5k");
+        assert_eq!(format_human(15_200), "15.2k");
+        assert_eq!(format_human(999_999), "1000.0k");
+    }
+
+    #[test]
+    fn format_human_millions() {
+        assert_eq!(format_human(1_000_000), "1.0M");
+        assert_eq!(format_human(2_500_000), "2.5M");
+        assert_eq!(format_human(999_999_999), "1000.0M");
+    }
+
+    #[test]
+    fn format_human_billions() {
+        assert_eq!(format_human(1_000_000_000), "1.0G");
+        assert_eq!(format_human(3_700_000_000), "3.7G");
+    }
+
+    // --- format_count ---
+
+    #[test]
+    fn format_count_plain() {
+        assert_eq!(format_count(42, false), "     42");
+    }
+
+    #[test]
+    fn format_count_human_mode() {
+        assert_eq!(format_count(42, true), "     42");
+        assert_eq!(format_count(1_500, true), "   1.5k");
+    }
+
+    // --- collect_files ---
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn create_temp_dir() -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "tc_test_{}_{}_{}",
+            std::process::id(),
+            id,
+            std::thread::current().name().unwrap_or("unknown")
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn collect_files_single_file() {
+        let dir = create_temp_dir();
+        let file = dir.join("test.txt");
+        fs::write(&file, "hello").unwrap();
+
+        let files = collect_files(&file, false);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], file);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_files_directory_non_recursive() {
+        let dir = create_temp_dir();
+        fs::write(dir.join("a.txt"), "a").unwrap();
+        fs::write(dir.join("b.txt"), "b").unwrap();
+        let sub = dir.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("c.txt"), "c").unwrap();
+
+        let files = collect_files(&dir, false);
+        // Should only get a.txt and b.txt, not sub/c.txt
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|f| f.parent().unwrap() == dir));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_files_directory_recursive() {
+        let dir = create_temp_dir();
+        fs::write(dir.join("a.txt"), "a").unwrap();
+        let sub = dir.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("b.txt"), "b").unwrap();
+        let deep = sub.join("deep");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("c.txt"), "c").unwrap();
+
+        let files = collect_files(&dir, true);
+        assert_eq!(files.len(), 3);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_files_nonexistent_returns_empty() {
+        let files = collect_files(Path::new("/nonexistent/path/xyz"), false);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn collect_files_results_are_sorted() {
+        let dir = create_temp_dir();
+        fs::write(dir.join("c.txt"), "c").unwrap();
+        fs::write(dir.join("a.txt"), "a").unwrap();
+        fs::write(dir.join("b.txt"), "b").unwrap();
+
+        let files = collect_files(&dir, false);
+        let names: Vec<_> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- process_file ---
+
+    #[test]
+    fn process_file_valid() {
+        let dir = create_temp_dir();
+        let file = dir.join("hello.txt");
+        fs::write(&file, "hello world").unwrap();
+
+        let bpe = cl100k_base().unwrap();
+        let counts = process_file(&file, &bpe).unwrap();
+        assert!(counts.tokens >= 1);
+        assert_eq!(counts.words, 2);
+        assert_eq!(counts.bytes, 11);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn process_file_nonexistent() {
+        let bpe = cl100k_base().unwrap();
+        let result = process_file(Path::new("/nonexistent/file.txt"), &bpe);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn process_file_empty() {
+        let dir = create_temp_dir();
+        let file = dir.join("empty.txt");
+        fs::write(&file, "").unwrap();
+
+        let bpe = cl100k_base().unwrap();
+        let counts = process_file(&file, &bpe).unwrap();
+        assert_eq!(counts.tokens, 0);
+        assert_eq!(counts.words, 0);
+        assert_eq!(counts.lines, 0);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- print_counts (output verification) ---
+
+    #[test]
+    fn print_counts_tokens_only() {
+        // When no extra flags are set, only tokens column should appear
+        let cli = Cli {
+            files: vec![],
+            lines: false,
+            words: false,
+            chars: false,
+            bytes: false,
+            human: false,
+            recursive: false,
+            encoding: "cl100k".to_string(),
+            list_encodings: false,
+            help: None,
+        };
+        let counts = Counts {
+            tokens: 42,
+            lines: 10,
+            words: 20,
+            chars: 30,
+            bytes: 40,
+        };
+        // Just verify it doesn't panic with/without a name
+        print_counts(&counts, None, &cli);
+        print_counts(&counts, Some("test.txt"), &cli);
+    }
+
+    #[test]
+    fn print_counts_all_flags() {
+        let cli = Cli {
+            files: vec![],
+            lines: true,
+            words: true,
+            chars: true,
+            bytes: true,
+            human: true,
+            recursive: false,
+            encoding: "cl100k".to_string(),
+            list_encodings: false,
+            help: None,
+        };
+        let counts = Counts {
+            tokens: 1500,
+            lines: 100,
+            words: 200,
+            chars: 3000,
+            bytes: 3500,
+        };
+        // Verify it doesn't panic when all flags are set
+        print_counts(&counts, Some("big.txt"), &cli);
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
