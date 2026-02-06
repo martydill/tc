@@ -1,0 +1,11 @@
+[package]
+name = "tc"
+version = "0.1.0"
+edition = "2021"
+description = "Token counter CLI - like wc but for tokens"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tiktoken-rs = "0.6"
+anyhow = "1"
+walkdir = "2"
