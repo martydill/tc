@@ -40,6 +40,10 @@ struct Cli {
     #[arg(short = 'r', short_alias = 'R', long)]
     recursive: bool,
 
+    /// Follow symbolic links when recursing directories
+    #[arg(short = 'L', long)]
+    follow_links: bool,
+
     /// Tokenizer encoding to use
     #[arg(short = 'e', long, default_value = "cl100k")]
     encoding: String,
@@ -154,7 +158,7 @@ fn list_encodings() {
 }
 
 /// Collect all files from a path (file or directory)
-fn collect_files(path: &Path, recursive: bool) -> Vec<std::path::PathBuf> {
+fn collect_files(path: &Path, recursive: bool, follow_links: bool) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
 
     if path.is_file() {
@@ -162,7 +166,7 @@ fn collect_files(path: &Path, recursive: bool) -> Vec<std::path::PathBuf> {
     } else if path.is_dir() {
         if recursive {
             for entry in WalkDir::new(path)
-                .follow_links(true)
+                .follow_links(follow_links)
                 .into_iter()
                 .filter_map(|e| e.ok())
             {
@@ -423,7 +427,7 @@ mod tests {
         let file = dir.join("test.txt");
         fs::write(&file, "hello").unwrap();
 
-        let files = collect_files(&file, false);
+        let files = collect_files(&file, false, false);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], file);
 
@@ -439,7 +443,7 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("c.txt"), "c").unwrap();
 
-        let files = collect_files(&dir, false);
+        let files = collect_files(&dir, false, false);
         // Should only get a.txt and b.txt, not sub/c.txt
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|f| f.parent().unwrap() == dir));
@@ -458,7 +462,7 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("c.txt"), "c").unwrap();
 
-        let files = collect_files(&dir, true);
+        let files = collect_files(&dir, true, false);
         assert_eq!(files.len(), 3);
 
         fs::remove_dir_all(&dir).unwrap();
@@ -466,7 +470,7 @@ mod tests {
 
     #[test]
     fn collect_files_nonexistent_returns_empty() {
-        let files = collect_files(Path::new("/nonexistent/path/xyz"), false);
+        let files = collect_files(Path::new("/nonexistent/path/xyz"), false, false);
         assert!(files.is_empty());
     }
 
@@ -477,7 +481,7 @@ mod tests {
         fs::write(dir.join("a.txt"), "a").unwrap();
         fs::write(dir.join("b.txt"), "b").unwrap();
 
-        let files = collect_files(&dir, false);
+        let files = collect_files(&dir, false, false);
         let names: Vec<_> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_str().unwrap().to_string())
@@ -539,6 +543,7 @@ mod tests {
             bytes: false,
             human: false,
             recursive: false,
+            follow_links: false,
             encoding: "cl100k".to_string(),
             list_encodings: false,
             help: None,
@@ -565,6 +570,7 @@ mod tests {
             bytes: true,
             human: true,
             recursive: false,
+            follow_links: false,
             encoding: "cl100k".to_string(),
             list_encodings: false,
             help: None,
@@ -607,7 +613,7 @@ fn main() -> Result<()> {
                 eprintln!("tc: {}: No such file or directory", input);
                 continue;
             }
-            all_files.extend(collect_files(path, cli.recursive));
+            all_files.extend(collect_files(path, cli.recursive, cli.follow_links));
         }
 
         // Initialize tokenizer once, then process files in parallel
