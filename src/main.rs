@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use rayon::prelude::*;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
+use tiktoken_rs::CoreBPE;
 use tiktoken_rs::{cl100k_base, o200k_base, p50k_base, p50k_edit, r50k_base};
 use walkdir::WalkDir;
 
@@ -70,29 +72,28 @@ impl Counts {
     }
 }
 
-fn count_tokens(text: &str, encoding: &str) -> Result<usize> {
-    let bpe = match encoding {
-        "cl100k" | "cl100k_base" => cl100k_base()?,
-        "o200k" | "o200k_base" => o200k_base()?,
-        "p50k" | "p50k_base" => p50k_base()?,
-        "p50k_edit" => p50k_edit()?,
-        "r50k" | "r50k_base" => r50k_base()?,
+fn create_bpe(encoding: &str) -> Result<CoreBPE> {
+    match encoding {
+        "cl100k" | "cl100k_base" => Ok(cl100k_base()?),
+        "o200k" | "o200k_base" => Ok(o200k_base()?),
+        "p50k" | "p50k_base" => Ok(p50k_base()?),
+        "p50k_edit" => Ok(p50k_edit()?),
+        "r50k" | "r50k_base" => Ok(r50k_base()?),
         _ => anyhow::bail!(
             "Unknown encoding: {}. Use --list-encodings to see available options.",
             encoding
         ),
-    };
-    Ok(bpe.encode_with_special_tokens(text).len())
+    }
 }
 
-fn count_all(text: &str, encoding: &str) -> Result<Counts> {
-    Ok(Counts {
-        tokens: count_tokens(text, encoding)?,
+fn count_all(text: &str, bpe: &CoreBPE) -> Counts {
+    Counts {
+        tokens: bpe.encode_with_special_tokens(text).len(),
         lines: text.lines().count(),
         words: text.split_whitespace().count(),
         chars: text.chars().count(),
         bytes: text.len(),
-    })
+    }
 }
 
 fn format_human(n: usize) -> String {
@@ -186,10 +187,10 @@ fn collect_files(path: &Path, recursive: bool) -> Vec<std::path::PathBuf> {
     files
 }
 
-fn process_file(path: &Path, encoding: &str) -> Result<Counts> {
+fn process_file(path: &Path, bpe: &CoreBPE) -> Result<Counts> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
-    count_all(&content, encoding)
+    Ok(count_all(&content, bpe))
 }
 
 fn main() -> Result<()> {
@@ -200,16 +201,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut total = Counts::default();
-    let mut file_count = 0;
-
     if cli.files.is_empty() {
         // Read from stdin
+        let bpe = create_bpe(&cli.encoding)?;
         let mut buffer = String::new();
         io::stdin()
             .read_to_string(&mut buffer)
             .context("Failed to read from stdin")?;
-        let counts = count_all(&buffer, &cli.encoding)?;
+        let counts = count_all(&buffer, &bpe);
         print_counts(&counts, None, &cli);
     } else {
         // Collect all files from all input paths
@@ -223,12 +222,26 @@ fn main() -> Result<()> {
             all_files.extend(collect_files(path, cli.recursive));
         }
 
-        for file_path in &all_files {
-            match process_file(file_path, &cli.encoding) {
+        // Initialize tokenizer once, then process files in parallel
+        let bpe = create_bpe(&cli.encoding)?;
+
+        let results: Vec<_> = all_files
+            .par_iter()
+            .map(|file_path| {
+                let result = process_file(file_path, &bpe);
+                (file_path, result)
+            })
+            .collect();
+
+        let mut total = Counts::default();
+        let mut file_count = 0;
+
+        for (file_path, result) in &results {
+            match result {
                 Ok(counts) => {
-                    total.add(&counts);
+                    total.add(counts);
                     file_count += 1;
-                    print_counts(&counts, Some(&file_path.display().to_string()), &cli);
+                    print_counts(counts, Some(&file_path.display().to_string()), &cli);
                 }
                 Err(e) => {
                     // Skip binary/unreadable files with a warning
